@@ -9,6 +9,40 @@ export const RAW: Point[] = rawPoints as Point[];
 
 export const ROAD_WIDTH = 92;
 
+/* ------------------------------------------------------------------ *
+ * Painted footprint of the road, in world units
+ *
+ * The scenery paints the asphalt plus three widening passes — gravel
+ * shoulder, soft dark verge — and blurs the outermost one. Every one of them
+ * is part of what the driver sees, so `fit` has to reserve all of it or the
+ * road runs off the canvas and the track reads as cropped. These numbers are
+ * the single source of truth for that: scenery.ts draws them, fit() reserves
+ * them.
+ * ------------------------------------------------------------------ */
+
+/** Extra width added to the gravel shoulder pass. */
+export const ROAD_SHOULDER = 22;
+/** Extra width added to the soft dark verge pass. */
+export const ROAD_VERGE = 46;
+/** Blur radius on that outermost pass, px. */
+export const ROAD_VERGE_BLUR = 7;
+/**
+ * How far past its stroke the blurred verge is worth reserving.
+ *
+ * The blur tails off over `blur` px; the last of it is a couple of percent of
+ * alpha, so the margin only has to cover the part that is actually visible.
+ */
+export const ROAD_VERGE_SPILL = 4;
+
+/** Half-width of everything the scenery paints around the centreline. */
+export const ROAD_HALF_PAINTED = ROAD_WIDTH / 2 + ROAD_VERGE / 2 + ROAD_VERGE_SPILL;
+
+/** Grass left visible between the painted road and the edge of the world box. */
+export const GRASS_MARGIN = 8;
+
+/** What `fit` reserves: the painted road plus a band of grass. */
+export const TRACK_MARGIN = ROAD_HALF_PAINTED + GRASS_MARGIN;
+
 /** Wrapped 3-tap smoothing pass — takes the jaggles out of hand drawn input. */
 export function smooth(points: Point[], passes = 3): Point[] {
   let out = points;
@@ -22,17 +56,28 @@ export function smooth(points: Point[], passes = 3): Point[] {
   return out;
 }
 
-/** Scales + centres a point cloud inside the world box. */
-export function fit(points: Point[], pad = 52): Point[] {
+/**
+ * Scales + centres a point cloud inside the world box, leaving `pad` world
+ * units of room on every side.
+ *
+ * `pad` defaults to TRACK_MARGIN so the *painted* road (asphalt + shoulder +
+ * verge + its blur) lands inside the canvas. Fitting to the centreline alone
+ * left the verge hanging 15px off the edge on all four sides.
+ */
+export function fit(points: Point[], pad = TRACK_MARGIN): Point[] {
   const xs = points.map((p) => p.x);
   const ys = points.map((p) => p.y);
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
   const maxY = Math.max(...ys);
-  const scale = Math.min((WORLD.w - pad * 2) / (maxX - minX), (WORLD.h - pad * 2) / (maxY - minY));
-  const offX = (WORLD.w - (maxX - minX) * scale) / 2;
-  const offY = (WORLD.h - (maxY - minY) * scale) / 2;
+  // A straight line (or a single dot) has zero extent on one axis; without the
+  // floor that divides by zero and the whole track comes out NaN.
+  const spanX = Math.max(1e-3, maxX - minX);
+  const spanY = Math.max(1e-3, maxY - minY);
+  const scale = Math.min((WORLD.w - pad * 2) / spanX, (WORLD.h - pad * 2) / spanY);
+  const offX = (WORLD.w - spanX * scale) / 2;
+  const offY = (WORLD.h - spanY * scale) / 2;
   return points.map((p) => ({ x: (p.x - minX) * scale + offX, y: (p.y - minY) * scale + offY }));
 }
 
@@ -68,49 +113,105 @@ export function closeLoop(points: Point[], segments = 8): Point[] {
   return out;
 }
 
-/**
- * Curvature-constrained relaxation.
- *
- * The hand-drawn input contains kinks tighter than the road is wide — one corner
- * has a 39px radius against a 46px half-width, so its inner edge has *negative*
- * radius and overlaps itself. No steering policy can put four wheels there, and
- * an unconstrained smoother just shrinks the loop and throws away the shape the
- * drawing was going for. So only vertices that violate the radius budget get
- * pulled toward their neighbours; everything else is left alone.
- *
- * The pull has to shrink as the violation does. A fixed aggressive weight makes a
- * band of tight vertices overshoot in lockstep and oscillate forever without ever
- * satisfying the constraint.
- */
-export function relaxCurvature(points: Point[], minRadius: number, passes = 3000): Point[] {
-  let out = points.map((p) => ({ x: p.x, y: p.y }));
-  const n = out.length;
-  const SPAN = 3;
+/** Circumradius through the samples `window` either side of `i`, world units. */
+function radiusAt(pts: Point[], i: number, window: number) {
+  const n = pts.length;
+  const a = pts[(i - window + n) % n];
+  const b = pts[i];
+  const c = pts[(i + window) % n];
+  const A = Math.hypot(b.x - a.x, b.y - a.y);
+  const B = Math.hypot(c.x - b.x, c.y - b.y);
+  const C = Math.hypot(c.x - a.x, c.y - a.y);
+  const area = Math.abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2;
+  return area < 1e-9 ? Infinity : (A * B * C) / (4 * area);
+}
 
-  for (let pass = 0; pass < passes; pass++) {
-    const next = out.map((p) => ({ x: p.x, y: p.y }));
-    let moved = 0;
+/** How tight the worst corner is on `pts`, plus where. */
+export function tightestRadius(pts: Point[], windows: number[] = [2, 4]) {
+  const n = pts.length;
+  let radius = Infinity;
+  let index = 0;
+  for (const w of windows) {
+    for (let i = 0; i < n; i++) {
+      const r = radiusAt(pts, i, w);
+      if (r < radius) {
+        radius = r;
+        index = i;
+      }
+    }
+  }
+  return { radius, index };
+}
+
+/**
+ * Curvature-weighted Laplacian diffusion — the corner rounder.
+ *
+ * Every vertex is pulled toward the midpoint of its neighbours, weighted by how
+ * far inside `minRadius` it sits: straights are left completely alone, tight
+ * corners get rounded. Iterating until the worst violation is inside tolerance
+ * spreads a kink over its neighbourhood instead of leaving one sharp sample.
+ *
+ * Why diffusion and not a chord pull: pulling a single vertex toward the chord
+ * across its ±w neighbours carves a V out of the polyline (measured — the
+ * "fixed" corner then shows up as a much smaller radius over 1-2 samples), and
+ * with a wide budget the loop folds over itself and grows 7x. A Laplacian is a
+ * convex combination of neighbours, so it can shorten and round but never fold,
+ * and combined with the per-node weight it converges instead of oscillating.
+ * The old version here ran 3000 passes of a decaying chord pull, never reached
+ * a stopping criterion, and left the track *more* kinked than its input
+ * (29 → 56px minimum over a 3-sample window) while shrinking it 42%.
+ */
+export function relaxCurvature(
+  points: Point[],
+  minRadius: number,
+  windows: number[] = [2, 4],
+  passes = 2000,
+  tolerance = 0.02,
+): Point[] {
+  const out = points.map((p) => ({ x: p.x, y: p.y }));
+  const n = out.length;
+  const widest = Math.max(...windows);
+  if (n < widest * 2 + 2) return out;
+
+  const worstViolation = () => {
+    let worst = 0;
+    for (const w of windows) {
+      for (let i = 0; i < n; i++) {
+        const r = radiusAt(out, i, w);
+        if (r < minRadius) worst = Math.max(worst, 1 - r / minRadius);
+      }
+    }
+    return worst;
+  };
+
+  let worst = worstViolation();
+  const STEP = 0.35;
+
+  for (let pass = 0; pass < passes && worst > tolerance; pass++) {
+    const nx = new Float64Array(n);
+    const ny = new Float64Array(n);
+    let touched = false;
 
     for (let i = 0; i < n; i++) {
-      const a = out[(i - SPAN + n) % n];
+      let w = 0;
+      for (const cand of windows) {
+        const r = radiusAt(out, i, cand);
+        if (r < minRadius) w = Math.max(w, Math.min(1, 1 - r / minRadius));
+      }
+      const a = out[(i - 1 + n) % n];
       const b = out[i];
-      const c = out[(i + SPAN) % n];
-      const A = Math.hypot(b.x - a.x, b.y - a.y);
-      const B = Math.hypot(c.x - b.x, c.y - b.y);
-      const C = Math.hypot(c.x - a.x, c.y - a.y);
-      const area = Math.abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2;
-      const radius = area < 1e-9 ? Infinity : (A * B * C) / (4 * area);
-      if (radius >= minRadius) continue;
-
-      // Violation ratio in 0…1, so the pull vanishes as the constraint is met.
-      const w = 0.25 * (1 - radius / minRadius);
-      next[i].x += ((a.x + c.x) / 2 - b.x) * w;
-      next[i].y += ((a.y + c.y) / 2 - b.y) * w;
-      moved++;
+      const c = out[(i + 1) % n];
+      nx[i] = b.x + ((a.x + c.x) / 2 - b.x) * w * STEP;
+      ny[i] = b.y + ((a.y + c.y) / 2 - b.y) * w * STEP;
+      if (w > 0) touched = true;
     }
 
-    out = next;
-    if (!moved) break;
+    if (!touched) break;
+    for (let i = 0; i < n; i++) {
+      out[i].x = nx[i];
+      out[i].y = ny[i];
+    }
+    worst = worstViolation();
   }
 
   return out;
@@ -168,27 +269,47 @@ function pathLength(points: Point[]) {
 }
 
 /**
- * Corner budget, enforced on the 600-sample working polyline *before* `fit`
- * scales it into the world box — so treat it as a shaping constraint rather than
- * a spec. The shape it produces lands at a ~90px tightest corner in final world
- * units, comfortably above the ~80px the car can hold at its slowest, which is
- * what actually matters: a circuit whose tightest corner is inside the car's
- * minimum radius can never be completed on the tarmac, whatever the network does.
+ * Corner budget for the shipped track, in world units, measured over ±2 and ±4
+ * samples (18px and 36px of arc at 300 samples) so it constrains the radius a
+ * car actually drives through, not a single sharp sample.
+ *
+ * It is set by what the car can hold:
+ *  - below ROAD_WIDTH / 2 = 46 the inner edge of the asphalt folds onto itself;
+ *  - below wheelbase / tan(STEER_AUTHORITY) ≈ 48 the car cannot follow the
+ *    centreline at any speed, so the GA can only learn to cut the corner over
+ *    the grass;
+ *  - at a ~140px budget the worst corner lands at ~103px, which is about the
+ *    radius the car holds at 200px/s (~45 km/h) — tight enough to be a corner,
+ *    wide enough to be driven without parking on the apex.
+ *
+ * The previous pipeline never got near this: it enforced a budget expressed in
+ * *drawing* units, before the shape was fitted, and the relaxation it fed (a
+ * 3000-pass chord pull) moved the tightest corner the wrong way — the shipped
+ * track had a 52px corner against a 48px car limit.
  */
-export const MIN_RADIUS = 160;
+export const MIN_RADIUS = 140;
+
+/** Windows the budget is measured over, in samples. */
+export const MIN_RADIUS_WINDOWS = [2, 4];
 
 /**
- * The canonical track: closed, cleaned, smoothed, curvature-legal, resampled, fitted.
+ * The canonical track: closed, cleaned, smoothed, curvature-legal, resampled
+ * and fitted so the whole painted road lands inside the world box.
  *
- * Relaxation runs at 600 samples, not 300: curvature has to be measured over a
- * known arc length for the budget to mean anything, and at 300 samples each
- * corner is checked over ~59px of track — coarse enough that the raw input's
- * tightest kink (39px against a 46px road half-width, so its inner edge has
- * *negative* radius and overlaps itself) sails through as "compliant".
+ * Order matters. Cleaning runs at 600 samples (curvature needs a known arc
+ * length for a budget to mean anything). The fit then maps the drawing into the
+ * world, and the real corner budget is enforced *after* it, on the 300-sample
+ * polyline the game drives — because a radius in drawing units is not a radius
+ * in world units, and only the world one decides whether the asphalt folds and
+ * whether the car can hold the line. The final fit re-expands the loop after the
+ * rounding pulled it in; a uniform scale can only raise every measured radius,
+ * so the budget survives it.
  */
-const SHAPED = relaxCurvature(resample(smooth(closeLoop(dedupe(RAW)), 4), 600), MIN_RADIUS);
+const CLEANED = resample(smooth(closeLoop(dedupe(RAW)), 4), 600);
+const FITTED = fit(resample(CLEANED, 300), TRACK_MARGIN);
+const LEGAL = relaxCurvature(FITTED, MIN_RADIUS, MIN_RADIUS_WINDOWS);
 
-export const TRACK: Point[] = fit(resample(SHAPED, 300), 54);
+export const TRACK: Point[] = fit(LEGAL, TRACK_MARGIN);
 export const TRACK_LENGTH = pathLength(TRACK);
 export const TRACK_LENGTH_KM = TRACK_LENGTH / 2200;
 export const START = TRACK[0];
@@ -263,7 +384,23 @@ export function angleAt(pts: Point[], i: number) {
   return Math.atan2(b.y - a.y, b.x - a.x);
 }
 
-/** Curvature magnitude per sample — used to paint kerbs only where it matters. */
+/** Radius under which a corner counts as a corner for the kerbs, world units. */
+export const KERB_RADIUS = 130;
+
+/**
+ * Where the kerbs go: the samples whose local radius is under KERB_RADIUS.
+ *
+ * Deliberately a radius rule and not a per-sample angle. How much a corner
+ * turns between two samples depends on the sampling — after the relaxation
+ * spread each corner over more samples, the old |angle| ≥ 0.2 test matched a
+ * single sample on the whole lap and the kerbs all but vanished. A radius means
+ * the same thing at any sample rate.
+ */
+export const KERB: boolean[] = TRACK.map(
+  (_, i) => Math.min(radiusAt(TRACK, i, 2), radiusAt(TRACK, i, 3)) < KERB_RADIUS,
+);
+
+/** Curvature magnitude per sample — the sign tells the kerbs which side to sit. */
 export const CURVATURE: number[] = TRACK.map((_, i) => {
   const n = TRACK.length;
   const prev = TRACK[(i - 1 + n) % n];
@@ -298,12 +435,17 @@ export type Prop = { x: number; y: number; r: number; kind: 0 | 1 | 2; tone: num
 export function scatterProps(count = 190, seed = 20261004): Prop[] {
   const rnd = mulberry32(seed);
   const props: Prop[] = [];
-  const clearance = ROAD_WIDTH / 2 + 22;
+  // Clear of the painted verge (not just the asphalt) so props are not
+  // swallowed by the road's outer passes…
+  const clearance = ROAD_HALF_PAINTED + 6;
+  // …and clear of the frame, because a tree centred on the last pixel renders
+  // as a half tree. Props are up to 28px across.
+  const edge = 30;
   let guard = 0;
   while (props.length < count && guard < count * 40) {
     guard++;
-    const x = rnd() * WORLD.w;
-    const y = rnd() * WORLD.h;
+    const x = edge + rnd() * (WORLD.w - edge * 2);
+    const y = edge + rnd() * (WORLD.h - edge * 2);
     if (nearestIndex({ x, y }, TRACK).dist < clearance) continue;
     const roll = rnd();
     const kind: Prop["kind"] = roll < 0.42 ? 0 : roll < 0.78 ? 1 : 2;

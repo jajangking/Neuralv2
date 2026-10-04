@@ -56,6 +56,10 @@ type Telemetry = {
   progress: number;
   laps: number;
   drift: number;
+  /** seconds into the current lap */
+  lapTime: number;
+  /** quickest completed lap, 0 until one is finished */
+  bestLap: number;
   sense: Sense | null;
   activation: Activation | null;
 };
@@ -68,9 +72,13 @@ const emptyTelemetry: Telemetry = {
   progress: 0,
   laps: 0,
   drift: 0,
+  lapTime: 0,
+  bestLap: 0,
   sense: null,
   activation: null,
 };
+
+const formatLap = (seconds: number) => (seconds > 0 ? `${seconds.toFixed(2)}s` : "–");
 
 /* ------------------------------------------------------------------ */
 
@@ -182,6 +190,7 @@ export default function NeuralDrive() {
   const ghostRef = useRef<{ path: { x: number; y: number }[]; speed: number[] }>({ path: [], speed: [] });
   const poseRef = useRef<DriveState>(freshDrive());
   const teleRef = useRef<Telemetry>(emptyTelemetry);
+  const bestLapRef = useRef(0);
 
   const invalidate = useCallback(() => {
     bgRef.current = null;
@@ -301,6 +310,14 @@ export default function NeuralDrive() {
         if (pose.progress >= TRACK_LENGTH) {
           pose.progress -= TRACK_LENGTH;
           pose.laps += 1;
+          // `elapsed` is the lap clock, so it has to start again on the line —
+          // it used to run on, which meant the very first lap timed the whole
+          // session and the drive was thrown away after 75s no matter how well
+          // the champion was doing.
+          if (pose.elapsed > 0) {
+            bestLapRef.current = bestLapRef.current > 0 ? Math.min(bestLapRef.current, pose.elapsed) : pose.elapsed;
+          }
+          pose.elapsed = 0;
         }
         pose.elapsed += step;
         pose.drift = drift;
@@ -316,8 +333,12 @@ export default function NeuralDrive() {
         const ghost = ghostRef.current;
         if (ghost.path.length) {
           const idx = Math.floor(time * 60) % ghost.path.length;
-          const nxt = ghost.path[(idx + 1) % ghost.path.length];
+          // heading comes from the *next* sample of the recorded lap; at the
+          // end of the rollout the ghost restarts from the top of the lap it
+          // was recorded over, so the two ends are neighbours on the track
+          const nextIdx = (idx + 1) % ghost.path.length;
           const p = ghost.path[idx];
+          const nxt = ghost.path[nextIdx];
           car = { x: p.x, y: p.y, angle: Math.atan2(nxt.y - p.y, nxt.x - p.x) };
           speed = ghost.speed[idx] ?? 0;
           steer = Math.sin(time * 2.2) * 0.08;
@@ -376,6 +397,7 @@ export default function NeuralDrive() {
         ctx.restore();
       }
 
+      // world units — the scene transform already carries the device scale
       drawCar(ctx, car.x, car.y, {
         angle: car.angle,
         steer: steerAngle(steer, speed),
@@ -383,7 +405,7 @@ export default function NeuralDrive() {
         brake,
         speed: Math.abs(speed),
         drift,
-      }, scene.k);
+      });
 
       teleRef.current = {
         speedKmh: Math.round(Math.abs(speed) * KMH),
@@ -395,6 +417,8 @@ export default function NeuralDrive() {
         progress: Math.min(1, Math.max(0, driving ? pose.progress / TRACK_LENGTH : gen / GENERATIONS)),
         laps: pose.laps,
         drift,
+        lapTime: pose.elapsed,
+        bestLap: bestLapRef.current,
         sense,
         activation,
       };
@@ -405,6 +429,7 @@ export default function NeuralDrive() {
   const restart = () => {
     brainRef.current = null;
     ghostRef.current = { path: [], speed: [] };
+    bestLapRef.current = 0;
     poseRef.current = freshDrive();
     teleRef.current = { ...emptyTelemetry };
     setGen(0);
@@ -487,6 +512,12 @@ export default function NeuralDrive() {
                   <div className="glass lap">
                     <div className="lap-head">
                       <span>{phase === "training" ? "Kemajuan evolusi" : `Lap ${snap.laps + 1}`}</span>
+                      {phase === "drive" && (
+                        <span className="mono">
+                          {formatLap(snap.lapTime)}
+                          {snap.bestLap > 0 ? ` · best ${formatLap(snap.bestLap)}` : ""}
+                        </span>
+                      )}
                       <b className="mono">{lapPct}%</b>
                     </div>
                     <div className="bar">

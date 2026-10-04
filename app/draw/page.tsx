@@ -17,9 +17,18 @@ export default function DrawTrack() {
   const [count, setCount] = useState(0);
   const [drawing, setDrawing] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle", text: "Sentuh kanvas untuk menggambar track." });
+  const [version, setVersion] = useState(0);
   const drawingRef = useRef(false);
 
-  
+  /**
+   * Forces a repaint of the static scene.
+   *
+   * Stage only repaints when `version` changes, so the stroke needs its own
+   * counter — `setCount(pts.length)` re-renders with the same value while the
+   * pointer is down and bails out, leaving the stroke unpainted until the
+   * pointer is released.
+   */
+  const onDirty = useCallback(() => setVersion((v) => v + 1), []);
 
   /* ---------------- drawing ---------------- */
   useEffect(() => {
@@ -28,10 +37,26 @@ export default function DrawTrack() {
 
     const pos = (e: PointerEvent): Point => {
       const rect = canvas.getBoundingClientRect();
+      if (!rect.width || !rect.height) return { x: 0, y: 0 };
+      // Normalised against the element's own CSS box, which is what the pointer
+      // is over — Stage keeps that box at a fixed aspect ratio inside a wrapper
+      // that may be larger, and the backing store is scaled by the device pixel
+      // ratio on top of it.
       return {
         x: ((e.clientX - rect.left) / rect.width) * WORLD.w,
         y: ((e.clientY - rect.top) / rect.height) * WORLD.h,
       };
+    };
+
+    // Stage only repaints a static scene when `version` changes, so the stroke
+    // has to be painted from here — it used to appear only on pointer-up.
+    let repaint: number | null = null;
+    const schedule = () => {
+      if (repaint !== null) return;
+      repaint = requestAnimationFrame(() => {
+        repaint = null;
+        onDirty();
+      });
     };
 
     const down = (e: PointerEvent) => {
@@ -42,6 +67,7 @@ export default function DrawTrack() {
       const p = pos(e);
       pointsRef.current = [p];
       setCount(1);
+      schedule();
     };
     const move = (e: PointerEvent) => {
       if (!drawingRef.current) return;
@@ -52,6 +78,7 @@ export default function DrawTrack() {
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < 2.4) return;
       pts.push(p);
       setCount(pts.length);
+      schedule();
     };
     const up = (e: PointerEvent) => {
       if (!drawingRef.current) return;
@@ -65,12 +92,13 @@ export default function DrawTrack() {
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointercancel", up);
     return () => {
+      if (repaint !== null) cancelAnimationFrame(repaint);
       canvas.removeEventListener("pointerdown", down);
       canvas.removeEventListener("pointermove", move);
       canvas.removeEventListener("pointerup", up);
       canvas.removeEventListener("pointercancel", up);
     };
-  }, []);
+  }, [onDirty]);
 
   /* ---------------- render ---------------- */
   const draw = useCallback((scene: Scene) => {
@@ -194,6 +222,8 @@ export default function DrawTrack() {
 
   const clear = () => {
     pointsRef.current = [];
+    drawingRef.current = false;
+    setDrawing(false);
     setCount(0);
     setStatus({ kind: "idle", text: "Kanvas dikosongkan." });
   };
@@ -231,7 +261,7 @@ export default function DrawTrack() {
       <div className="editor-grid rise rise-1">
         <div className="stage-frame">
           <div className="stage-viewport">
-            <Stage draw={draw} version={count} canvasRef={canvasEl}>
+            <Stage draw={draw} version={version} canvasRef={canvasEl}>
               <div className="stage-veil" />
               <div className="hud">
                 <div className="hud-row">
@@ -248,7 +278,7 @@ export default function DrawTrack() {
             </Stage>
           </div>
           <div className="stage-caption">
-            <span>Jalkan tidak otomatis — sentuh kanvas untuk mulai.</span>
+            <span>Jalan tidak otomatis — sentuh kanvas untuk mulai.</span>
             <span className="mono">{ready ? "siap disimpan" : `butuh ≥ ${MIN_POINTS} titik`}</span>
           </div>
         </div>
@@ -297,7 +327,9 @@ export default function DrawTrack() {
               </div>
             </div>
             <div className="panel-note" style={{ marginTop: 12 }}>
-              Track dihaluskan 4× dan di-resample ke 300 titik, jadi garis kasar tidak membuat mobil “gemetar”.
+              Setelah disimpan, gambar dihaluskan 4×, di-resample ke 300 titik, lalu tiap tikungan dibulatkan
+              sampai radiusnya ≥140 px — jadi garis kasar tidak membuat mobil “gemetar”, dan aspalnya tidak
+              melipat di tikungan tajam.
             </div>
           </section>
 

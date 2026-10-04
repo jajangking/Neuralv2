@@ -1,6 +1,10 @@
 import {
   CURVATURE,
+  KERB,
   PROPS,
+  ROAD_SHOULDER,
+  ROAD_VERGE,
+  ROAD_VERGE_BLUR,
   ROAD_WIDTH,
   START,
   START_ANGLE,
@@ -12,9 +16,7 @@ import {
 
 export type Surface = {
   ctx: CanvasRenderingContext2D;
-  /** device pixels per world unit */
-  k: number;
-  /** canvas size in device pixels */
+  /** canvas size in device pixels (only used for the grass grain loop) */
   w: number;
   h: number;
 };
@@ -58,7 +60,7 @@ function circle(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) 
 
 /** Soft ground texture — baked into the scenery layer, never re-drawn per frame. */
 function paintGrass(s: Surface) {
-  const { ctx, k } = s;
+  const { ctx } = s;
   const w = WORLD.w;
   const h = WORLD.h;
   const grad = ctx.createLinearGradient(0, 0, w * 0.35, h);
@@ -79,42 +81,42 @@ function paintGrass(s: Surface) {
   ctx.save();
   ctx.globalAlpha = 0.5;
   ctx.strokeStyle = PALETTE.grassLight;
-  ctx.lineWidth = 26 * k;
+  ctx.lineWidth = 26;
   for (let i = -2; i < 8; i++) {
     ctx.beginPath();
     const y = i * (h / 5.4);
     ctx.moveTo(-40, y);
-    ctx.quadraticCurveTo(w / 2, y - 26 * k * (i % 2 === 0 ? 1 : -1), w + 40, y);
+    ctx.quadraticCurveTo(w / 2, y - 26 * (i % 2 === 0 ? 1 : -1), w + 40, y);
     ctx.stroke();
   }
   ctx.restore();
 
   // grain
   ctx.fillStyle = "rgba(255,255,255,0.035)";
-  const step = 11 * k;
+  const step = 11;
   for (let y = 0; y < h; y += step) {
     for (let x = ((y / step) % 2) * step * 0.5; x < w; x += step) {
-      ctx.fillRect(x, y, 1 * k, 1 * k);
+      ctx.fillRect(x, y, 1, 1);
     }
   }
 }
 
 function paintProp(s: Surface, p: Prop) {
-  const { ctx, k } = s;
+  const { ctx } = s;
   const r = p.r;
   // contact shadow
   ctx.fillStyle = "rgba(0,0,0,0.3)";
   ctx.save();
   ctx.translate(p.x, p.y);
   ctx.scale(1, 0.42);
-  circle(ctx, 3 * k, 5 * k, r * 1.12);
+  circle(ctx, 3, 5, r * 1.12);
   ctx.fill();
   ctx.restore();
 
   if (p.kind === 0) {
     // tree: layered canopy
     ctx.fillStyle = "#12291a";
-    circle(ctx, p.x, p.y + 1.5 * k, r);
+    circle(ctx, p.x, p.y + 1.5, r);
     ctx.fill();
     ctx.fillStyle = "#1d5232";
     circle(ctx, p.x - r * 0.12, p.y - r * 0.12, r * 0.82);
@@ -149,35 +151,37 @@ function paintProp(s: Surface, p: Prop) {
   } else {
     // grass tuft
     ctx.strokeStyle = "rgba(150, 224, 158, 0.55)";
-    ctx.lineWidth = 1.6 * k;
+    ctx.lineWidth = 1.6;
     ctx.lineCap = "round";
     for (let i = -1; i <= 1; i++) {
       ctx.beginPath();
-      ctx.moveTo(p.x + i * 3 * k, p.y + r * 0.5);
-      ctx.quadraticCurveTo(p.x + i * 5 * k, p.y - r * 0.2, p.x + i * 7 * k, p.y - r * 0.7);
+      ctx.moveTo(p.x + i * 3, p.y + r * 0.5);
+      ctx.quadraticCurveTo(p.x + i * 5, p.y - r * 0.2, p.x + i * 7, p.y - r * 0.7);
       ctx.stroke();
     }
   }
 }
 
 function paintRoad(s: Surface) {
-  const { ctx, k } = s;
+  const { ctx } = s;
   const center = centerPath(TRACK);
 
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
 
-  // wet-ish outer verge
+  // wet-ish outer verge — the widths here are what fit() reserves around the
+  // centreline (see ROAD_HALF_PAINTED in track.ts), so the whole road always
+  // lands inside the world box
   ctx.save();
   ctx.strokeStyle = "rgba(0,0,0,0.34)";
-  ctx.filter = `blur(${7 * k}px)`;
-  ctx.lineWidth = ROAD_WIDTH + 46;
+  ctx.filter = `blur(${ROAD_VERGE_BLUR}px)`;
+  ctx.lineWidth = ROAD_WIDTH + ROAD_VERGE;
   ctx.stroke(center);
   ctx.restore();
 
   // gravel shoulder
   ctx.strokeStyle = PALETTE.gravel;
-  ctx.lineWidth = ROAD_WIDTH + 22;
+  ctx.lineWidth = ROAD_WIDTH + ROAD_SHOULDER;
   ctx.stroke(center);
 
   // asphalt base
@@ -187,7 +191,7 @@ function paintRoad(s: Surface) {
 
   // build-up: wide, blurred pass fakes the camber
   ctx.save();
-  ctx.filter = `blur(${5 * k}px)`;
+  ctx.filter = `blur(${5}px)`;
   ctx.strokeStyle = PALETTE.asphaltMid;
   ctx.lineWidth = ROAD_WIDTH * 0.74;
   ctx.stroke(center);
@@ -198,7 +202,7 @@ function paintRoad(s: Surface) {
 
   // crisp edge lines
   ctx.strokeStyle = "rgba(236, 244, 255, 0.34)";
-  ctx.lineWidth = 1.6 * k;
+  ctx.lineWidth = 1.6;
   ctx.stroke(center);
 
   // racing line: subtle darker wear where cars go
@@ -214,15 +218,15 @@ function paintRoad(s: Surface) {
   // centre dashes
   ctx.strokeStyle = PALETTE.paint;
   ctx.setLineDash([24, 30]);
-  ctx.lineWidth = 3.4 * k;
+  ctx.lineWidth = 3.4;
   ctx.stroke(center);
   ctx.setLineDash([]);
 
   // kerbs where the track actually turns
   const n = TRACK.length;
   for (let i = 0; i < n; i++) {
+    if (!KERB[i]) continue;
     const bend = CURVATURE[i];
-    if (Math.abs(bend) < 0.2) continue;
     const p = TRACK[i];
     const q = TRACK[(i + 1) % n];
     const ang = Math.atan2(q.y - p.y, q.x - p.x);
@@ -234,7 +238,7 @@ function paintRoad(s: Surface) {
     ctx.translate(p.x + nx * offset * side, p.y + ny * offset * side);
     ctx.rotate(ang);
     ctx.fillStyle = i % 4 < 2 ? PALETTE.kerbA : PALETTE.kerbB;
-    ctx.fillRect(-2 * k, -7 * k, 8 * k, 14 * k);
+    ctx.fillRect(-2, -7, 8, 14);
     ctx.restore();
   }
 
@@ -256,7 +260,7 @@ function paintRoad(s: Surface) {
     }
   }
   ctx.strokeStyle = "rgba(255,255,255,0.45)";
-  ctx.lineWidth = 1.4 * k;
+  ctx.lineWidth = 1.4;
   ctx.strokeRect(-band / 2, -half, band, half * 2);
   ctx.restore();
 }
@@ -270,7 +274,7 @@ export function renderScenery(canvas: HTMLCanvasElement, scale: number) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
-  const s: Surface = { ctx, k: scale, w, h };
+  const s: Surface = { ctx, w, h };
 
   paintGrass(s);
   for (const p of PROPS) paintProp(s, p);
@@ -294,7 +298,13 @@ export type CarLook = {
   drift: number;
 };
 
-export function drawCar(ctx: CanvasRenderingContext2D, x: number, y: number, look: CarLook, k = 1) {
+/**
+ * Draws the car in *world* units — the caller's ctx is already transformed, so
+ * nothing here may be multiplied by the device scale. (It used to be, and on a
+ * 2x screen the car came out twice the size and wider than the road, with its
+ * wheels floating off the body.)
+ */
+export function drawCar(ctx: CanvasRenderingContext2D, x: number, y: number, look: CarLook) {
   const { angle, steer, throttle, brake, speed, drift } = look;
   ctx.save();
   ctx.translate(x, y);
@@ -303,8 +313,8 @@ export function drawCar(ctx: CanvasRenderingContext2D, x: number, y: number, loo
   ctx.save();
   ctx.rotate(angle);
   ctx.fillStyle = PALETTE.shadow;
-  ctx.filter = `blur(${4 * k}px)`;
-  roundRect(ctx, -26 * k + 3 * k, -14 * k + 4 * k, 54 * k, 30 * k, 9 * k);
+  ctx.filter = `blur(${4}px)`;
+  roundRect(ctx, -26 + 3, -14 + 4, 54, 30, 9);
   ctx.fill();
   ctx.filter = "none";
   ctx.restore();
@@ -313,23 +323,23 @@ export function drawCar(ctx: CanvasRenderingContext2D, x: number, y: number, loo
 
   // brake glow
   if (brake > 0.05) {
-    const glow = ctx.createRadialGradient(-28 * k, 0, 1 * k, -28 * k, 0, 22 * k);
+    const glow = ctx.createRadialGradient(-28, 0, 1, -28, 0, 22);
     glow.addColorStop(0, `rgba(255, 70, 70, ${0.42 * brake})`);
     glow.addColorStop(1, "transparent");
     ctx.fillStyle = glow;
-    ctx.fillRect(-52 * k, -24 * k, 44 * k, 48 * k);
+    ctx.fillRect(-52, -24, 44, 48);
   }
 
   // wheels
   const wheel = (wx: number, wy: number, rot: number) => {
     ctx.save();
-    ctx.translate(wx * k, wy * k);
+    ctx.translate(wx, wy);
     ctx.rotate(rot);
     ctx.fillStyle = PALETTE.tyre;
-    roundRect(ctx, -8 * k, -4.2 * k, 16 * k, 8.4 * k, 3 * k);
+    roundRect(ctx, -8, -4.2, 16, 8.4, 3);
     ctx.fill();
     ctx.fillStyle = PALETTE.rim;
-    ctx.fillRect(-2.4 * k, -3.4 * k, 4.8 * k, 6.8 * k);
+    ctx.fillRect(-2.4, -3.4, 4.8, 6.8);
     ctx.restore();
   };
   const steerAngle = steer * 0.42;
@@ -339,79 +349,79 @@ export function drawCar(ctx: CanvasRenderingContext2D, x: number, y: number, loo
   wheel(-17, 13.5, 0);
 
   // chassis
-  const body = ctx.createLinearGradient(0, -14 * k, 0, 14 * k);
+  const body = ctx.createLinearGradient(0, -14, 0, 14);
   body.addColorStop(0, PALETTE.carTop);
   body.addColorStop(0.5, "#ef4038");
   body.addColorStop(1, PALETTE.carBottom);
   ctx.fillStyle = body;
-  roundRect(ctx, -27 * k, -13 * k, 55 * k, 26 * k, 8.5 * k);
+  roundRect(ctx, -27, -13, 55, 26, 8.5);
   ctx.fill();
 
   // top-down specular sheen
-  const sheen = ctx.createLinearGradient(-27 * k, -13 * k, 27 * k, 13 * k);
+  const sheen = ctx.createLinearGradient(-27, -13, 27, 13);
   sheen.addColorStop(0, "rgba(255,255,255,0.34)");
   sheen.addColorStop(0.4, "rgba(255,255,255,0.05)");
   sheen.addColorStop(1, "rgba(0,0,0,0.16)");
   ctx.fillStyle = sheen;
-  roundRect(ctx, -27 * k, -13 * k, 55 * k, 26 * k, 8.5 * k);
+  roundRect(ctx, -27, -13, 55, 26, 8.5);
   ctx.fill();
 
   // nose + splitter
   ctx.fillStyle = PALETTE.carTrim;
-  roundRect(ctx, 25 * k, -8 * k, 4.5 * k, 16 * k, 2 * k);
+  roundRect(ctx, 25, -8, 4.5, 16, 2);
   ctx.fill();
   ctx.fillStyle = PALETTE.carDark;
-  roundRect(ctx, -30 * k, -10 * k, 5 * k, 20 * k, 2 * k);
+  roundRect(ctx, -30, -10, 5, 20, 2);
   ctx.fill();
 
   // cockpit
   ctx.fillStyle = PALETTE.carGlass;
-  roundRect(ctx, -8 * k, -8.5 * k, 18 * k, 17 * k, 5.5 * k);
+  roundRect(ctx, -8, -8.5, 18, 17, 5.5);
   ctx.fill();
   ctx.fillStyle = PALETTE.carGlassHi;
   ctx.globalAlpha = 0.55;
-  roundRect(ctx, 0, -7 * k, 5 * k, 14 * k, 2.5 * k);
+  roundRect(ctx, 0, -7, 5, 14, 2.5);
   ctx.fill();
   ctx.globalAlpha = 1;
 
   // racing stripe
   ctx.fillStyle = "rgba(255,255,255,0.86)";
-  ctx.fillRect(-24 * k, -1.6 * k, 48 * k, 3.2 * k);
+  ctx.fillRect(-24, -1.6, 48, 3.2);
 
   // spoiler
   ctx.fillStyle = PALETTE.carDark;
-  roundRect(ctx, -32 * k, -17 * k, 5.5 * k, 34 * k, 2.5 * k);
+  roundRect(ctx, -32, -17, 5.5, 34, 2.5);
   ctx.fill();
 
   // headlights + tail lights
   const headAura = throttle > 0.05 ? 0.55 : 0.3;
   ctx.fillStyle = `rgba(255, 243, 208, ${headAura})`;
-  roundRect(ctx, 24 * k, -10.5 * k, 4 * k, 7 * k, 1.6 * k);
+  roundRect(ctx, 24, -10.5, 4, 7, 1.6);
   ctx.fill();
-  roundRect(ctx, 24 * k, 3.5 * k, 4 * k, 7 * k, 1.6 * k);
+  roundRect(ctx, 24, 3.5, 4, 7, 1.6);
   ctx.fill();
   ctx.fillStyle = brake > 0.05 ? "#ff5252" : "#a4161f";
-  ctx.fillRect(-29.5 * k, -9.5 * k, 2.6 * k, 6.5 * k);
-  ctx.fillRect(-29.5 * k, 3 * k, 2.6 * k, 6.5 * k);
+  ctx.fillRect(-29.5, -9.5, 2.6, 6.5);
+  ctx.fillRect(-29.5, 3, 2.6, 6.5);
 
   // speed shimmer
   if (speed > 380) {
     ctx.globalAlpha = Math.min(0.5, (speed - 380) / 700);
     ctx.fillStyle = "#dff3ff";
     for (let i = 0; i < 3; i++) {
-      const x0 = (30 + i * 9) * k;
-      ctx.fillRect(x0, (-9 + i * 7) * k, 16 * k, 1.6 * k);
+      const x0 = 30 + i * 9;
+      ctx.fillRect(x0, -9 + i * 7, 16, 1.6);
     }
     ctx.globalAlpha = 1;
   }
 
   // drift smoke at the rear axle
   if (drift > 0.02) {
-    const smoke = ctx.createRadialGradient(-26 * k, 0, 1 * k, -26 * k, 0, 30 * k);
+    const smoke = ctx.createRadialGradient(-26, 0, 1, -26, 0, 30);
     smoke.addColorStop(0, `rgba(226, 232, 245, ${0.4 * drift})`);
     smoke.addColorStop(1, "transparent");
     ctx.fillStyle = smoke;
-    ctx.fillRect(-58 * k, -32 * k, 62 * k, 64 * k);
+    ctx.fillRect(-58, -32, 62, 64);
   }
 
   ctx.restore();

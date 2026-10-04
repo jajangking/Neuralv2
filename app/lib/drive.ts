@@ -137,9 +137,17 @@ const PX_PER_INDEX = TRACK_LENGTH / TRACK.length;
 /** `arc` is where the car is; `progress` is credited distance. */
 export type Progress = { arc: number; progress: number };
 
+/**
+ * Where a fresh car sits along the track.
+ *
+ * The nearest-point search is handed the start index as its hint so it only
+ * looks at the local window — without it, both `freshDrive()` and the lap
+ * counter fell back to an exhaustive scan of all 300 samples every time they
+ * were called.
+ */
 export function emptyProgress(): Progress {
   const k = startPose();
-  return { arc: senseAt(k.x, k.y, k.angle, 0).arc, progress: 0 };
+  return { arc: senseAt(k.x, k.y, k.angle, 0, TRACK, 0).arc, progress: 0 };
 }
 
 /**

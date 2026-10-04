@@ -215,15 +215,22 @@ export default function ManualDrive() {
       }
 
       const drag = 0.0019 * speedForward * Math.abs(speedForward);
-      const rolling = Math.abs(speedForward) > 1 ? 24 * Math.sign(speedForward) : 0;
-      let next = speedForward + (force - drag - rolling) * step;
+      let next = speedForward + (force - drag) * step;
+      // Rolling resistance opposes *motion*, not the direction the nose points —
+      // in reverse the two differ, and the old `speedForward`-signed term pushed
+      // the car forward, so it settled at a standstill instead of backing up.
+      const rolling = Math.abs(next) > 1 ? 24 * Math.sign(next) : 0;
+      next = clamp(next - rolling * step, -190, MAX_FORWARD);
       if (downKey && Math.sign(next) !== Math.sign(speedForward) && speedForward !== 0) next = 0;
-      next = clamp(next, -190, MAX_FORWARD);
       if (!up && !downKey && Math.abs(next) < 16) next = 0;
 
       car.angle += (next / 34) * Math.tan(car.steer) * step;
       car.vx = Math.cos(car.angle) * next - Math.sin(car.angle) * lateral;
       car.vy = Math.sin(car.angle) * next + Math.cos(car.angle) * lateral;
+      // where the car was *before* this tick — `advanceProgress` caps the lap
+      // credit at the distance actually covered, so this has to be sampled
+      // before the move or the cap is always zero
+      const from = { x: car.x, y: car.y };
       car.x += car.vx * step;
       car.y += car.vy * step;
 
@@ -243,7 +250,6 @@ export default function ManualDrive() {
       }
 
       // progress + offroad bookkeeping
-      const from = { x: car.x, y: car.y };
       advanceProgress(poseRef.current, arcAt(hit.index, hit.t), hit.dist < MAX_LATERAL, Math.hypot(car.x - from.x, car.y - from.y));
       if (hit.dist >= MAX_LATERAL) pose.offroad = Math.min(6, pose.offroad + step);
       else pose.offroad = Math.max(0, pose.offroad - step * 1.5);
@@ -302,20 +308,14 @@ export default function ManualDrive() {
       ctx.restore();
     }
 
-    drawCar(
-      ctx,
-      car.x,
-      car.y,
-      {
-        angle: car.angle,
-        steer: car.steer,
-        throttle: up ? 1 : 0,
-        brake: downKey ? 1 : 0,
-        speed: Math.hypot(car.vx, car.vy),
-        drift: pose.drift,
-      },
-      scene.k,
-    );
+    drawCar(ctx, car.x, car.y, {
+      angle: car.angle,
+      steer: car.steer,
+      throttle: up ? 1 : 0,
+      brake: downKey ? 1 : 0,
+      speed: Math.hypot(car.vx, car.vy),
+      drift: pose.drift,
+    });
 
     teleRef.current = {
       speed: Math.round(Math.hypot(car.vx, car.vy) * KMH),
